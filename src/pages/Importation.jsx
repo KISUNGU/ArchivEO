@@ -1,0 +1,386 @@
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  HandCoins, Upload, FolderOpen, FileText, Loader2, Sparkles, Save, CheckCircle2, Mail,
+  Calendar, User, Tag, Building2, ClipboardList,
+} from 'lucide-react';
+import { extractPdfText, renderPdfFirstPage } from '../services/pdfTextExtractor';
+import { summarizeDocument } from '../services/aiAgentService';
+import { listCategories } from '../services/categoriesService';
+import { listServiceGroups, listServices } from '../services/servicesService';
+import { createDocument } from '../services/documentsService';
+import { logActivity } from '../services/activityLogService';
+import { uploadDocumentFile } from '../services/storageService';
+import { useSession } from '../context/SessionContext';
+
+const EXT_TYPE = {
+  pdf: 'Document PDF',
+  doc: 'Document Word',
+  docx: 'Document Word',
+  jpg: 'Image numérisée',
+  jpeg: 'Image numérisée',
+  png: 'Image numérisée',
+  tiff: 'Image numérisée',
+  tif: 'Image numérisée',
+  txt: 'Texte brut',
+};
+
+const IMAGE_EXT = new Set(['jpg', 'jpeg', 'png']);
+
+let tempId = 0;
+
+async function extractContent(file, ext) {
+  if (ext === 'pdf') {
+    try {
+      const { text, pageCount } = await extractPdfText(file);
+      return { contentText: text, pageCount };
+    } catch {
+      return { contentText: '', pageCount: 1 };
+    }
+  }
+  if (ext === 'txt') {
+    const text = await file.text();
+    return { contentText: text, pageCount: 1 };
+  }
+  return { contentText: '', pageCount: 1 };
+}
+
+async function buildPreview(file, ext) {
+  try {
+    if (ext === 'pdf') return await renderPdfFirstPage(file);
+    if (IMAGE_EXT.has(ext) || ext === 'tif' || ext === 'tiff') return URL.createObjectURL(file);
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function fileToBase64(file) {
+  const buffer = await file.arrayBuffer();
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+const EMPTY_FORM = {
+  title: '', docDate: '', sender: '', subject: '',
+  categoryId: '', serviceId: '', tags: '', summary: '',
+};
+
+export default function Importation({ onBack }) {
+  const { session } = useSession();
+  const [dragging, setDragging] = useState(false);
+  const [items, setItems] = useState([]);
+  const [categories, setCategories] = useState([]);
+  const [serviceGroups, setServiceGroups] = useState([]);
+  const [services, setServices] = useState([]);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    listCategories().then(setCategories).catch(() => {});
+    listServiceGroups().then(setServiceGroups).catch(() => {});
+    listServices().then(setServices).catch(() => {});
+  }, []);
+
+  const updateItem = (id, patch) => {
+    setItems(prev => prev.map(it => (it.id === id ? { ...it, ...patch } : it)));
+  };
+
+  const patchForm = (id, patch) => {
+    setItems(prev => prev.map(it => (it.id === id ? { ...it, form: { ...it.form, ...patch } } : it)));
+  };
+
+  const processFile = async (file) => {
+    const id = ++tempId;
+    const ext = file.name.split('.').pop()?.toLowerCase() || '';
+    const docType = EXT_TYPE[ext] || 'Autre';
+
+    setItems(prev => [...prev, {
+      id, file, name: file.name, sizeKb: Math.round(file.size / 1024), docType,
+      status: 'reading', contentText: '', pageCount: 1, aiResult: null, previewUrl: null,
+      form: { ...EMPTY_FORM, title: file.name.replace(/\.[^.]+$/, '') },
+    }]);
+
+    const [{ contentText, pageCount }, previewUrl] = await Promise.all([
+      extractContent(file, ext),
+      buildPreview(file, ext),
+    ]);
+    updateItem(id, { contentText, pageCount, previewUrl, status: 'analyzing' });
+
+    try {
+      let imageBase64, imageMediaType;
+      if (!contentText && IMAGE_EXT.has(ext) && file.size < 4.5 * 1024 * 1024) {
+        imageBase64 = await fileToBase64(file);
+        imageMediaType = ext === 'png' ? 'image/png' : 'image/jpeg';
+      }
+
+      const result = await summarizeDocument({
+        fileName: file.name,
+        docType,
+        contentText,
+        imageBase64,
+        imageMediaType,
+        services: services.map(s => s.name),
+      });
+
+      const matchedCategory = categories.find(c => c.name === result.category);
+      const matchedService = services.find(s => s.name === result.serviceName);
+      updateItem(id, {
+        status: 'ready',
+        aiResult: result,
+        contentText: contentText || result.extractedText || '',
+        form: {
+          title: result.title || file.name.replace(/\.[^.]+$/, ''),
+          docDate: /^\d{4}-\d{2}-\d{2}$/.test(result.docDate || '') ? result.docDate : '',
+          sender: result.sender || '',
+          subject: result.subject || '',
+          categoryId: matchedCategory ? matchedCategory.id : '',
+          serviceId: matchedService ? matchedService.id : '',
+          tags: (result.tags || []).join(', '),
+          summary: result.summary || '',
+        },
+      });
+    } catch (err) {
+      updateItem(id, { status: 'error', error: err.message });
+    }
+  };
+
+  const handleFiles = (fileList) => {
+    Array.from(fileList).forEach(processFile);
+  };
+
+  const handleArchive = async (item) => {
+    updateItem(item.id, { status: 'saving' });
+    try {
+      let fileUrl = null;
+      try {
+        fileUrl = await uploadDocumentFile(item.file, item.name, session?.province);
+      } catch {
+        fileUrl = null; // l'archivage se poursuit même si l'upload de la pièce échoue
+      }
+
+      const newDoc = await createDocument({
+        name: item.form.title || item.name,
+        category_id: item.form.categoryId || null,
+        service_id: item.form.serviceId || null,
+        doc_type: item.docType,
+        source: 'upload',
+        province: session?.province || 'Kinshasa',
+        status: 'archived',
+        size_kb: item.sizeKb,
+        page_count: item.pageCount,
+        content_text: item.contentText,
+        file_url: fileUrl,
+        ai_summary: item.form.summary,
+        ai_tags: item.form.tags.split(',').map(t => t.trim()).filter(Boolean),
+        ai_confidence: item.aiResult?.confidence ?? null,
+        doc_date: item.form.docDate || null,
+        sender: item.form.sender || null,
+        subject: item.form.subject || null,
+      });
+      await logActivity({ documentId: newDoc.id, action: 'upload', detail: `Import : ${item.name}` });
+      await logActivity({
+        documentId: newDoc.id,
+        action: 'ai_summary',
+        detail: item.aiResult?.demo ? 'Résumé généré (mode démo, sans clé IA)' : 'Résumé généré par Claude',
+      });
+      updateItem(item.id, { status: 'saved' });
+    } catch (err) {
+      updateItem(item.id, { status: 'error', error: err.message });
+    }
+  };
+
+  const inputCls = 'bg-slate-100 dark:bg-white/10 border border-slate-200 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-slate-900 dark:text-white outline-none focus:border-teal-500/60 w-full placeholder-slate-400 dark:placeholder-slate-500';
+  const labelCls = 'text-slate-500 text-[11px] font-medium flex items-center gap-1';
+
+  return (
+    <div className="flex flex-col gap-6 h-full">
+      <div className="flex items-center gap-4">
+        <div className="p-3 rounded-xl bg-[#008B8B]">
+          <HandCoins className="h-6 w-6 text-white" strokeWidth={1.5} />
+        </div>
+        <div>
+          <h2 className="text-xl md:text-2xl font-bold text-slate-900 dark:text-white">Importation</h2>
+          <p className="text-slate-500 text-sm">Importer des documents depuis votre appareil</p>
+        </div>
+        <button
+          onClick={onBack}
+          className="ml-auto px-4 py-2 bg-slate-100 dark:bg-white/10 hover:bg-slate-200 dark:hover:bg-white/20 border border-slate-200 dark:border-white/10 rounded-xl text-xs font-semibold text-slate-900 dark:text-white transition-all"
+        >
+          ← Accueil
+        </button>
+      </div>
+
+      <hr className="border-slate-200 dark:border-white/10" />
+
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.tiff,.tif,.txt"
+        className="hidden"
+        onChange={e => { handleFiles(e.target.files); e.target.value = ''; }}
+      />
+
+      <div
+        onDragOver={e => { e.preventDefault(); setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={e => { e.preventDefault(); setDragging(false); handleFiles(e.dataTransfer.files); }}
+        onClick={() => inputRef.current?.click()}
+        className={`border-2 border-dashed rounded-2xl flex flex-col items-center justify-center gap-3 transition-all min-h-28 cursor-pointer ${
+          dragging
+            ? 'border-teal-400 bg-teal-500/10'
+            : 'border-slate-300 dark:border-white/20 bg-slate-100/50 dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 hover:border-slate-400 dark:hover:border-white/30'
+        }`}
+      >
+        <Upload className={`h-8 w-8 transition-colors ${dragging ? 'text-teal-400' : 'text-slate-400'}`} />
+        <div className="text-center">
+          <p className="text-slate-900 dark:text-white font-medium text-sm">Glissez vos fichiers ici, ou cliquez pour parcourir</p>
+          <p className="text-slate-500 text-xs mt-1">PDF, DOCX, JPEG, TIFF, TXT · lus et pré-classés automatiquement par l'IA</p>
+        </div>
+      </div>
+
+      <div className="flex flex-col sm:flex-row gap-3">
+        <button
+          onClick={() => inputRef.current?.click()}
+          className="flex-1 flex items-center justify-center gap-2 bg-[#008B8B] hover:bg-[#008B8B]/80 text-white py-3 rounded-xl font-semibold text-sm transition-all"
+        >
+          <FolderOpen className="h-4 w-4" /> Parcourir les fichiers
+        </button>
+        <button
+          disabled
+          title="Nécessite une configuration IMAP côté serveur (à venir)"
+          className="flex-1 flex items-center justify-center gap-2 bg-slate-100 dark:bg-white/5 text-slate-400 py-3 rounded-xl font-semibold text-sm border border-slate-200 dark:border-white/10 cursor-not-allowed"
+        >
+          <Mail className="h-4 w-4" /> Depuis l'e-mail (bientôt)
+        </button>
+      </div>
+
+      <div className="flex-1 flex flex-col gap-4 overflow-auto">
+        {items.map(item => (
+          <div key={item.id} className="bg-slate-100/80 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-xl p-4 flex flex-col gap-3">
+            <div className="flex items-center gap-3">
+              <FileText className="h-5 w-5 text-teal-500 dark:text-teal-400 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-slate-900 dark:text-white text-sm font-medium truncate">{item.name}</p>
+                <p className="text-slate-500 text-xs">{item.docType} · {item.sizeKb} Ko · {item.pageCount} page(s)</p>
+              </div>
+              {item.status === 'reading' && <span className="text-xs text-slate-500 flex items-center gap-1.5"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Lecture…</span>}
+              {item.status === 'analyzing' && <span className="text-xs text-blue-600 dark:text-blue-300 flex items-center gap-1.5"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Analyse IA…</span>}
+              {item.status === 'saving' && <span className="text-xs text-slate-500 flex items-center gap-1.5"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Enregistrement…</span>}
+              {item.status === 'error' && <span className="text-xs text-red-500 dark:text-red-400">{item.error}</span>}
+              {item.status === 'saved' && <span className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5"><CheckCircle2 className="h-3.5 w-3.5" /> Archivé</span>}
+            </div>
+
+            {(item.status === 'ready' || item.status === 'saving') && (
+              <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4">
+
+                <div className="bg-slate-200/50 dark:bg-slate-950/40 border border-slate-200 dark:border-white/10 rounded-lg p-3 flex items-start justify-center overflow-auto max-h-80 lg:max-h-none">
+                  {item.previewUrl ? (
+                    <img
+                      src={item.previewUrl}
+                      alt={`Aperçu de ${item.name}`}
+                      className="rounded shadow-xl max-w-full h-auto bg-white"
+                    />
+                  ) : item.contentText ? (
+                    <pre className="text-slate-600 dark:text-slate-300 text-[11px] whitespace-pre-wrap font-mono w-full max-h-72 overflow-auto">
+                      {item.contentText.slice(0, 1200)}{item.contentText.length > 1200 ? '…' : ''}
+                    </pre>
+                  ) : (
+                    <div className="text-slate-400 text-xs flex flex-col items-center gap-2 py-8">
+                      <FileText className="h-8 w-8 opacity-30" />
+                      Aperçu non disponible pour ce format
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-col gap-2.5">
+                  <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-2.5 text-slate-600 dark:text-slate-300 text-xs flex items-start gap-2">
+                    <Sparkles className="h-3.5 w-3.5 text-blue-500 dark:text-blue-400 shrink-0 mt-0.5" />
+                    <span>
+                      Fiche pré-remplie par l'agent IA — vérifiez et corrigez si besoin.
+                      {item.aiResult?.demo && <span className="ml-2 text-amber-500 dark:text-amber-300">(mode démo)</span>}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <label className="flex flex-col gap-1 sm:col-span-2">
+                      <span className={labelCls}><FileText className="h-3 w-3" /> Titre</span>
+                      <input value={item.form.title} onChange={e => patchForm(item.id, { title: e.target.value })} className={inputCls} />
+                    </label>
+
+                    <label className="flex flex-col gap-1">
+                      <span className={labelCls}><Calendar className="h-3 w-3" /> Date du document</span>
+                      <input type="date" value={item.form.docDate} onChange={e => patchForm(item.id, { docDate: e.target.value })} className={inputCls} />
+                    </label>
+
+                    <label className="flex flex-col gap-1">
+                      <span className={labelCls}><User className="h-3 w-3" /> Expéditeur / Auteur</span>
+                      <input value={item.form.sender} onChange={e => patchForm(item.id, { sender: e.target.value })} placeholder="Ex. Kivu Solutions Sarl" className={inputCls} />
+                    </label>
+
+                    <label className="flex flex-col gap-1 sm:col-span-2">
+                      <span className={labelCls}><ClipboardList className="h-3 w-3" /> Objet</span>
+                      <input value={item.form.subject} onChange={e => patchForm(item.id, { subject: e.target.value })} placeholder="Objet du document" className={inputCls} />
+                    </label>
+
+                    <label className="flex flex-col gap-1">
+                      <span className={labelCls}><Tag className="h-3 w-3" /> Nature</span>
+                      <select value={item.form.categoryId} onChange={e => patchForm(item.id, { categoryId: e.target.value })} className={inputCls}>
+                        <option value="">Non classé</option>
+                        {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
+                    </label>
+
+                    <label className="flex flex-col gap-1">
+                      <span className={labelCls}><Building2 className="h-3 w-3" /> Service concerné</span>
+                      <select value={item.form.serviceId} onChange={e => patchForm(item.id, { serviceId: e.target.value })} className={inputCls}>
+                        <option value="">Non affecté</option>
+                        {serviceGroups.map(g => (
+                          <optgroup key={g.id} label={g.name}>
+                            {g.services.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                          </optgroup>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label className="flex flex-col gap-1 sm:col-span-2">
+                      <span className={labelCls}><Tag className="h-3 w-3" /> Mots-clés</span>
+                      <input value={item.form.tags} onChange={e => patchForm(item.id, { tags: e.target.value })} className={inputCls} />
+                    </label>
+
+                    <label className="flex flex-col gap-1 sm:col-span-2">
+                      <span className={labelCls}><Sparkles className="h-3 w-3" /> Résumé (modifiable)</span>
+                      <textarea
+                        value={item.form.summary}
+                        onChange={e => patchForm(item.id, { summary: e.target.value })}
+                        rows={3}
+                        className={`${inputCls} resize-none`}
+                      />
+                    </label>
+                  </div>
+
+                  <button
+                    onClick={() => handleArchive(item)}
+                    disabled={item.status === 'saving'}
+                    className="self-start flex items-center gap-2 bg-emerald-600 hover:bg-emerald-600/80 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-xs font-semibold transition-all"
+                  >
+                    {item.status === 'saving' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                    Archiver ce document
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+
+        {items.length === 0 && (
+          <p className="text-slate-500 text-sm text-center py-6">Aucun fichier en cours d'import.</p>
+        )}
+      </div>
+    </div>
+  );
+}

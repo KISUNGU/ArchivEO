@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="fr" translate="no" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <script>
+      // Applique le thème avant le rendu pour éviter un flash clair/sombre
+      try {
+        if (localStorage.getItem('theme') === 'light') {
+          document.documentElement.classList.remove('dark');
+        }
+      } catch (e) { /* stockage indisponible : thème sombre par défaut */ }
+    </script>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="google" content="notranslate" />
+    <title>ArchivEO — Archivage électronique</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
