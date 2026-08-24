@@ -1,0 +1,17 @@
+# =====================================================================
+#  ArchivÉo — Fichier .env.local de l'application React
+#
+#  Copiez ce contenu dans   C:\Projets\electronic-archiving\.env.local
+#  puis relancez :          npm run dev
+#
+#  ⚠️  .env.local ne doit jamais être commité (déjà dans .gitignore).
+# =====================================================================
+
+# --- Installation locale (Docker sur le poste ou le serveur du bureau) ---
+VITE_SUPABASE_URL=http://localhost:8000
+
+# --- Installation sur un VPS : remplacez par l'adresse du serveur ---
+# VITE_SUPABASE_URL=http://VOTRE_IP_SERVEUR:8000
+
+# Clé publique (rôle anon) — identique à ANON_KEY dans supabase.env
+VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNzY3MjI1NjAwLCJleHAiOjIwODI1ODU2MDB9.Jsa4fcqGkgye1LpxXfteSgSPvhRB5tXF-HBGMEJjzqo

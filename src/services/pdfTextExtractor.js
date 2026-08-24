@@ -32,3 +32,25 @@ export async function renderPdfFirstPage(file, maxWidth = 480) {
   await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
   return canvas.toDataURL('image/png');
 }
+
+// Rend les premières pages d'un PDF scanné (sans calque texte) en images JPEG base64,
+// pour que l'agent IA puisse les lire par vision (OCR) et pré-remplir la fiche.
+export async function renderPdfPagesAsBase64(file, maxPages = 4, maxWidth = 1100) {
+  const buffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+  const pageCount = Math.min(pdf.numPages, maxPages);
+  const imagesBase64 = [];
+  for (let pageNum = 1; pageNum <= pageCount; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const baseViewport = page.getViewport({ scale: 1 });
+    const scale = Math.min(2, maxWidth / baseViewport.width);
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+    imagesBase64.push(dataUrl.split(',')[1]);
+  }
+  return { imagesBase64, mediaType: 'image/jpeg' };
+}

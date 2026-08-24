@@ -1,8 +1,8 @@
 import { supabase } from '../lib/supabaseClient';
 
-export async function summarizeDocument({ fileName, docType, contentText, imageBase64, imagesBase64, imageMediaType, services }) {
+export async function summarizeDocument({ fileName, docType, contentText, imageBase64, imagesBase64, imageMediaType, categories, services }) {
   const { data, error } = await supabase.functions.invoke('summarize-document', {
-    body: { fileName, docType, contentText, imageBase64, imagesBase64, imageMediaType, services },
+    body: { fileName, docType, contentText, imageBase64, imagesBase64, imageMediaType, categories, services },
   });
   if (error) throw error;
   return data;

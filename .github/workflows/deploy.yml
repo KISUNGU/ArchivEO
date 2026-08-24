@@ -1,0 +1,62 @@
+# Déploiement automatique d'ArchivÉo sur GitHub Pages.
+# Chaque push sur `main` reconstruit l'application et publie le site à :
+# https://kisungu.github.io/ArchivEO/
+#
+# Prérequis (à faire une seule fois sur GitHub) :
+# Settings → Pages → Build and deployment → Source : "GitHub Actions"
+
+name: Déployer sur GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # La clé "anon" Supabase est publique par conception (elle est de toute façon
+      # visible dans le bundle JavaScript). La sécurité repose sur Supabase Auth + RLS.
+      VITE_SUPABASE_URL: https://vearyyxukgtyficbumez.supabase.co
+      VITE_SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZlYXJ5eXh1a2d0eWZpY2J1bWV6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM1OTY5OTUsImV4cCI6MjA5OTE3Mjk5NX0.MCm-y16N3tRxgXiDFOKv6DL92hZQ6wL0sMZ7epWXBKM
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Installer les dépendances
+        run: npm ci
+
+      - name: Construire l'application
+        run: npm run build
+
+      - name: Préparer l'artefact Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publier sur GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

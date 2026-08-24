@@ -8,7 +8,6 @@ import { listDocuments } from '../services/documentsService';
 import { logActivity } from '../services/activityLogService';
 import { detectScannerBridge, listPrinters } from '../services/scannerBridgeService';
 import VerificationComptable from '../components/VerificationComptable';
-import { useSession } from '../context/SessionContext';
 
 const NEXT_STATUS = { 'En attente': 'En cours', 'En cours': 'Terminé', 'Terminé': 'Terminé' };
 
@@ -55,10 +54,8 @@ export default function Impression({ onBack }) {
   const [printing, setPrinting] = useState(false);
   const [showVerification, setShowVerification] = useState(false);
   const [fraisConfirmes, setFraisConfirmes] = useState([]);
-  const { session, isSuperAdmin } = useSession();
-  const provinceScope = isSuperAdmin ? null : session?.province;
 
-  const refresh = () => listQueue({ province: provinceScope }).then(q => {
+  const refresh = () => listQueue().then(q => {
     setQueue(q);
     setSelectedId(prev => (q.some(i => i.id === prev) ? prev : (q[0]?.id ?? null)));
   }).finally(() => setLoading(false));
@@ -68,14 +65,14 @@ export default function Impression({ onBack }) {
     detectScannerBridge().then(bridge => {
       if (bridge) listPrinters().then(setPrinters).catch(() => setPrinters([]));
     });
-  }, [provinceScope]);
+  }, []);
 
   const selected = queue.find(i => i.id === selectedId) || null;
   const selectedDoc = selected?.documents || null;
 
   const openPicker = async () => {
     setPicking(true);
-    setDocuments(await listDocuments({ province: provinceScope }));
+    setDocuments(await listDocuments());
   };
 
   const handleAdd = async (doc) => {

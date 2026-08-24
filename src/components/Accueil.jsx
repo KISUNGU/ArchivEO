@@ -43,10 +43,11 @@ export default function Accueil() {
   const [activeMenu, setActiveMenu] = useState(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
-  const [loginForm, setLoginForm] = useState({ email: 'admin@kinshasa.cd', password: 'admin123' });
+  const [loginForm, setLoginForm] = useState({ email: '', password: '' });
   const [loginError, setLoginError] = useState('');
+  const [loggingIn, setLoggingIn] = useState(false);
   const { isDark, toggle } = useTheme();
-  const { accounts, session, signIn, signOut, isSuperAdmin } = useSession();
+  const { session, initializing, signIn, signOut, isSuperAdmin } = useSession();
 
   const goHome = () => setActiveMenu(null);
 
@@ -207,15 +208,26 @@ export default function Accueil() {
   const cx = 50;
   const cy = 50;
 
-  const handleLogin = (event) => {
+  const handleLogin = async (event) => {
     event.preventDefault();
+    setLoggingIn(true);
     try {
-      signIn(loginForm.email, loginForm.password);
+      await signIn(loginForm.email, loginForm.password);
       setLoginError('');
     } catch (error) {
       setLoginError(error.message);
+    } finally {
+      setLoggingIn(false);
     }
   };
+
+  if (initializing) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[linear-gradient(135deg,_#020617,_#0f172a_55%,_#111827)]">
+        <div className="h-8 w-8 rounded-full border-2 border-blue-400 border-t-transparent animate-spin" />
+      </div>
+    );
+  }
 
   if (!session) {
     return (
@@ -256,13 +268,14 @@ export default function Accueil() {
 
               <button
                 type="submit"
-                className="mt-5 w-full rounded-2xl bg-gradient-to-r from-blue-500 to-indigo-600 px-4 py-3.5 text-sm font-semibold text-white shadow-lg shadow-blue-900/30 transition hover:scale-[1.01]"
+                disabled={loggingIn}
+                className="mt-5 w-full rounded-2xl bg-gradient-to-r from-blue-500 to-indigo-600 px-4 py-3.5 text-sm font-semibold text-white shadow-lg shadow-blue-900/30 transition hover:scale-[1.01] disabled:opacity-60"
               >
-                Se connecter
+                {loggingIn ? 'Connexion…' : 'Se connecter'}
               </button>
 
               <div className="mt-5 rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-xs text-slate-400">
-                Comptes de démonstration : <span className="text-slate-200">admin@kinshasa.cd</span> / <span className="text-slate-200">super@archiveo.cd</span>
+                Accès sécurisé — contactez le Super Admin pour obtenir ou réinitialiser un compte.
               </div>
             </form>
           </div>

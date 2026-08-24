@@ -3,7 +3,7 @@ import {
   HandCoins, Upload, FolderOpen, FileText, Loader2, Sparkles, Save, CheckCircle2, Mail,
   Calendar, User, Tag, Building2, ClipboardList,
 } from 'lucide-react';
-import { extractPdfText, renderPdfFirstPage } from '../services/pdfTextExtractor';
+import { extractPdfText, renderPdfFirstPage, renderPdfPagesAsBase64 } from '../services/pdfTextExtractor';
 import { summarizeDocument } from '../services/aiAgentService';
 import { listCategories } from '../services/categoriesService';
 import { listServiceGroups, listServices } from '../services/servicesService';
@@ -70,6 +70,31 @@ const EMPTY_FORM = {
   categoryId: '', serviceId: '', tags: '', summary: '',
 };
 
+function normalizeLabel(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+}
+
+function parseDocumentDate(value) {
+  const text = String(value || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  const match = text.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})$/);
+  if (!match) return '';
+  const [, day, month, year] = match;
+  return `${year.length === 2 ? `20${year}` : year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+}
+
+function extractLabeledValue(text, labels) {
+  const pattern = labels.join('|');
+  const line = String(text || '')
+    .split(/\r?\n/)
+    .find(value => new RegExp(`^\\s*(?:${pattern})\\s*[:：-]`, 'i').test(value));
+  return line?.replace(new RegExp(`^\\s*(?:${pattern})\\s*[:：-]\\s*`, 'i'), '').trim() || '';
+}
+
 export default function Importation({ onBack }) {
   const { session } = useSession();
   const [dragging, setDragging] = useState(false);
@@ -78,11 +103,17 @@ export default function Importation({ onBack }) {
   const [serviceGroups, setServiceGroups] = useState([]);
   const [services, setServices] = useState([]);
   const inputRef = useRef(null);
+  const metadataReady = useRef(null);
 
   useEffect(() => {
-    listCategories().then(setCategories).catch(() => {});
-    listServiceGroups().then(setServiceGroups).catch(() => {});
-    listServices().then(setServices).catch(() => {});
+    metadataReady.current = Promise.all([listCategories(), listServiceGroups(), listServices()]);
+    metadataReady.current
+      .then(([loadedCategories, loadedServiceGroups, loadedServices]) => {
+        setCategories(loadedCategories);
+        setServiceGroups(loadedServiceGroups);
+        setServices(loadedServices);
+      })
+      .catch(() => {});
   }, []);
 
   const updateItem = (id, patch) => {
@@ -97,6 +128,7 @@ export default function Importation({ onBack }) {
     const id = ++tempId;
     const ext = file.name.split('.').pop()?.toLowerCase() || '';
     const docType = EXT_TYPE[ext] || 'Autre';
+    const [loadedCategories, , loadedServices] = await (metadataReady.current || Promise.all([listCategories(), listServiceGroups(), listServices()]));
 
     setItems(prev => [...prev, {
       id, file, name: file.name, sizeKb: Math.round(file.size / 1024), docType,
@@ -111,10 +143,20 @@ export default function Importation({ onBack }) {
     updateItem(id, { contentText, pageCount, previewUrl, status: 'analyzing' });
 
     try {
-      let imageBase64, imageMediaType;
+      let imageBase64, imagesBase64, imageMediaType;
       if (!contentText && IMAGE_EXT.has(ext) && file.size < 4.5 * 1024 * 1024) {
         imageBase64 = await fileToBase64(file);
         imageMediaType = ext === 'png' ? 'image/png' : 'image/jpeg';
+      } else if (!contentText && ext === 'pdf') {
+        // PDF scanné (image pure, sans calque texte) : on rend les premières pages
+        // en images pour que l'IA les lise par vision (OCR).
+        try {
+          const rendered = await renderPdfPagesAsBase64(file);
+          imagesBase64 = rendered.imagesBase64;
+          imageMediaType = rendered.mediaType;
+        } catch {
+          // sans rendu possible, l'IA se basera sur le nom du fichier
+        }
       }
 
       const result = await summarizeDocument({
@@ -122,21 +164,25 @@ export default function Importation({ onBack }) {
         docType,
         contentText,
         imageBase64,
+        imagesBase64,
         imageMediaType,
-        services: services.map(s => s.name),
+        categories: loadedCategories.map(c => c.name),
+        services: loadedServices.map(s => s.name),
       });
 
-      const matchedCategory = categories.find(c => c.name === result.category);
-      const matchedService = services.find(s => s.name === result.serviceName);
+      const matchedCategory = loadedCategories.find(c => normalizeLabel(c.name) === normalizeLabel(result.category));
+      const matchedService = loadedServices.find(s => normalizeLabel(s.name) === normalizeLabel(result.serviceName));
+      const extractedSender = extractLabeledValue(contentText, ['expéditeur', 'expediteur', 'auteur', 'de']);
+      const extractedSubject = extractLabeledValue(contentText, ['objet', 'subject']);
       updateItem(id, {
         status: 'ready',
         aiResult: result,
         contentText: contentText || result.extractedText || '',
         form: {
           title: result.title || file.name.replace(/\.[^.]+$/, ''),
-          docDate: /^\d{4}-\d{2}-\d{2}$/.test(result.docDate || '') ? result.docDate : '',
-          sender: result.sender || '',
-          subject: result.subject || '',
+          docDate: parseDocumentDate(result.docDate || extractLabeledValue(contentText, ['date'])) ,
+          sender: result.sender || extractedSender,
+          subject: result.subject || extractedSubject,
           categoryId: matchedCategory ? matchedCategory.id : '',
           serviceId: matchedService ? matchedService.id : '',
           tags: (result.tags || []).join(', '),
@@ -302,9 +348,16 @@ export default function Importation({ onBack }) {
                     <Sparkles className="h-3.5 w-3.5 text-blue-500 dark:text-blue-400 shrink-0 mt-0.5" />
                     <span>
                       Fiche pré-remplie par l'agent IA — vérifiez et corrigez si besoin.
-                      {item.aiResult?.demo && <span className="ml-2 text-amber-500 dark:text-amber-300">(mode démo)</span>}
+                      {item.aiResult?.demo && !item.aiResult?.fallbackReason && <span className="ml-2 text-amber-500 dark:text-amber-300">(mode démo)</span>}
                     </span>
                   </div>
+
+                  {item.aiResult?.fallbackReason && (
+                    <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-2.5 text-amber-600 dark:text-amber-300 text-xs">
+                      ⚠ Analyse IA indisponible (API inaccessible ou crédit épuisé) — la fiche a été remplie
+                      par une analyse locale simplifiée. Vérifiez attentivement chaque champ avant d'archiver.
+                    </div>
+                  )}
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                     <label className="flex flex-col gap-1 sm:col-span-2">

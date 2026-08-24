@@ -57,9 +57,10 @@ function EditableName({ value, onSave, className = '' }) {
 export default function Parametres({ onBack }) {
   const [checking, setChecking] = useState(true);
   const [bridge, setBridge] = useState(null);
-  const { accounts, createAccount, deleteAccount, isSuperAdmin, session } = useSession();
+  const { accounts, createAccount, deleteAccount, refreshAccounts, isSuperAdmin, session } = useSession();
   const [newUser, setNewUser] = useState({ name: '', email: '', password: '', province: 'Kwilu', accessLevel: 'admin' });
   const [userError, setUserError] = useState('');
+  const [savingUser, setSavingUser] = useState(false);
   const [scanners, setScanners] = useState([]);
   const [printers, setPrinters] = useState([]);
   const [loadingDevices, setLoadingDevices] = useState(false);
@@ -82,6 +83,12 @@ export default function Parametres({ onBack }) {
     listServiceGroups().then(setGroups).catch(err => setSvcError(err.message));
 
   useEffect(() => { reloadGroups(); }, []);
+
+  useEffect(() => {
+    if (isSuperAdmin) {
+      refreshAccounts().catch(err => setUserError(err.message));
+    }
+  }, [isSuperAdmin]);
 
   const svc = async (fn) => {
     setSvcError(null);
@@ -116,12 +123,25 @@ export default function Parametres({ onBack }) {
 
   useEffect(() => { refresh(); }, []);
 
-  const handleCreateUser = (event) => {
+  const handleCreateUser = async (event) => {
     event.preventDefault();
+    setUserError('');
+    setSavingUser(true);
     try {
-      createAccount(newUser);
+      await createAccount(newUser);
       setNewUser({ name: '', email: '', password: '', province: 'Kwilu', accessLevel: 'admin' });
-      setUserError('');
+    } catch (error) {
+      setUserError(error.message);
+    } finally {
+      setSavingUser(false);
+    }
+  };
+
+  const handleDeleteAccount = async (account) => {
+    if (!window.confirm(`Supprimer définitivement le compte ${account.email} ?`)) return;
+    setUserError('');
+    try {
+      await deleteAccount(account.id);
     } catch (error) {
       setUserError(error.message);
     }
@@ -225,7 +245,7 @@ export default function Parametres({ onBack }) {
               <option value="admin">Rôle : Admin (gestion complète, y compris suppression)</option>
               <option value="user">Rôle : Utilisateur (sans droit de suppression)</option>
             </select>
-            <button type="submit" className="rounded-lg bg-[#008B8B] text-white px-3 py-2 text-sm font-semibold">Créer le compte</button>
+            <button type="submit" disabled={savingUser} className="rounded-lg bg-[#008B8B] text-white px-3 py-2 text-sm font-semibold disabled:opacity-60">{savingUser ? 'Création…' : 'Créer le compte'}</button>
           </form>
           {userError && <p className="text-red-600 text-xs">{userError}</p>}
           <div className="grid gap-2">
@@ -241,7 +261,7 @@ export default function Parametres({ onBack }) {
                     </span>
                   </p>
                 </div>
-                <button onClick={() => deleteAccount(account.id)} className="text-xs text-rose-500 hover:underline">Supprimer</button>
+                <button onClick={() => handleDeleteAccount(account)} className="text-xs text-rose-500 hover:underline">Supprimer</button>
               </div>
             ))}
           </div>

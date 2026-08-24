@@ -26,3 +26,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Kit base de données auto-hébergée
+# supabase.env contient le secret JWT et les mots de passe Postgres.
+db-kit/supabase.env
+db-kit/supabase-stack/

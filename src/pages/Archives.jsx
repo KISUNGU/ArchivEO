@@ -355,7 +355,7 @@ export default function Archives({ onBack, focusDocumentId = null, onFocusHandle
           <input
             value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder="Rechercher..."
+            placeholder="Rechercher (titre, expéditeur, objet, résumé, contenu)..."
             className="w-full bg-slate-100 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-lg pl-8 pr-3 py-2 text-xs text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 outline-none focus:border-slate-400 dark:focus:border-white/30 transition-all"
           />
         </div>

@@ -46,6 +46,7 @@ export default function ScanDirect({ onBack }) {
   const [previewPage, setPreviewPage] = useState(0);
   const [previewZoom, setPreviewZoom] = useState(1);
   const [copied, setCopied] = useState(false);
+  const metadataReady = React.useRef(null);
 
   const [bridgeStatus, setBridgeStatus] = useState('checking');
   const [devices, setDevices] = useState([]);
@@ -74,9 +75,14 @@ export default function ScanDirect({ onBack }) {
   };
 
   useEffect(() => {
-    listCategories().then(setCategories).catch(err => setError(err.message));
-    listServiceGroups().then(setServiceGroups).catch(() => {});
-    listServices().then(setServices).catch(() => {});
+    metadataReady.current = Promise.all([listCategories(), listServiceGroups(), listServices()]);
+    metadataReady.current
+      .then(([loadedCategories, loadedServiceGroups, loadedServices]) => {
+        setCategories(loadedCategories);
+        setServiceGroups(loadedServiceGroups);
+        setServices(loadedServices);
+      })
+      .catch(err => setError(err.message));
     probeBridge();
   }, []);
 
@@ -126,6 +132,7 @@ export default function ScanDirect({ onBack }) {
     setError(null);
     setStep('analyzing');
     try {
+      const [loadedCategories, , loadedServices] = await (metadataReady.current || Promise.all([listCategories(), listServiceGroups(), listServices()]));
       const result = await summarizeDocument({
         fileName: scanData.fileName,
         docType: scanData.docType,
@@ -133,14 +140,16 @@ export default function ScanDirect({ onBack }) {
         imageBase64: scanData.imageBase64,
         imagesBase64: scanData.imagesBase64,
         imageMediaType: scanData.imageMediaType,
-        services: services.map(s => s.name),
+        categories: loadedCategories.map(c => c.name),
+        services: loadedServices.map(s => s.name),
       });
       setAiResult(result);
       if (result.extractedText && !scanData.contentText) {
         setScanData(d => ({ ...d, contentText: result.extractedText }));
       }
-      const matchedCategory = categories.find(c => c.name === result.category);
-      const matchedService = services.find(s => s.name === result.serviceName);
+      const norm = v => String(v || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+      const matchedCategory = loadedCategories.find(c => norm(c.name) === norm(result.category));
+      const matchedService = loadedServices.find(s => norm(s.name) === norm(result.serviceName));
       setForm({
         title: result.title || scanData.fileName.replace(/\.[^.]+$/, ''),
         categoryId: matchedCategory ? matchedCategory.id : '',
@@ -498,9 +507,17 @@ export default function ScanDirect({ onBack }) {
                   <p className="text-slate-900 dark:text-white text-sm font-semibold flex items-center gap-2">
                     <Sparkles className="h-4 w-4 text-blue-500 dark:text-blue-400" /> Résumé généré par l'IA
                     {aiResult.demo && (
-                      <span className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-300">Mode démo</span>
+                      <span className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-300">
+                        {aiResult.fallbackReason ? 'IA indisponible — analyse locale' : 'Mode démo'}
+                      </span>
                     )}
                   </p>
+                  {aiResult.fallbackReason && (
+                    <p className="text-amber-600 dark:text-amber-300 text-xs bg-amber-500/10 border border-amber-500/30 rounded-lg p-2.5">
+                      ⚠ L'analyse IA a échoué (API inaccessible ou crédit épuisé) : les champs ont été remplis
+                      par une analyse locale simplifiée. Vérifiez-les attentivement avant d'enregistrer.
+                    </p>
+                  )}
                   <p className="text-slate-600 dark:text-slate-300 text-sm leading-relaxed">{form.summary}</p>
                   <div className="flex flex-wrap gap-1.5 mt-1">
                     {form.tags.split(',').map(t => t.trim()).filter(Boolean).map(tag => (

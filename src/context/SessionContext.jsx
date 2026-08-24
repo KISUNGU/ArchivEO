@@ -1,155 +1,129 @@
-import React, { createContext, useContext, useMemo, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import { supabase } from '../lib/supabaseClient';
 
-const STORAGE_KEY = 'archiveo-session';
-const ACCOUNTS_KEY = 'archiveo-accounts';
+// Nettoyage des anciennes clés localStorage (contenaient les mots de passe en clair
+// de l'ancien système d'authentification côté navigateur).
+try {
+  localStorage.removeItem('archiveo-session');
+  localStorage.removeItem('archiveo-accounts');
+} catch {
+  // stockage inaccessible : rien à nettoyer
+}
 
-const DEFAULT_ACCOUNTS = [
-  {
-    id: 'kinshasa-admin',
-    name: 'Administration nationale',
-    email: 'admin@kinshasa.cd',
-    password: 'admin123',
-    role: 'national',
-    province: 'Kinshasa',
-    accessLevel: 'admin',
-    canManageUsers: false,
-  },
-  {
-    id: 'kwilu-user',
-    name: 'UPE Kwilu',
-    email: 'kwilu@archiveo.cd',
-    password: 'kwilu123',
-    role: 'province',
-    province: 'Kwilu',
-    accessLevel: 'admin',
-    canManageUsers: false,
-  },
-  {
-    id: 'kasai-user',
-    name: 'UPE Kasaï',
-    email: 'kasai@archiveo.cd',
-    password: 'kasai123',
-    role: 'province',
-    province: 'Kasaï',
-    accessLevel: 'admin',
-    canManageUsers: false,
-  },
-  {
-    id: 'kasai-central-user',
-    name: 'UPE Kasaï Central',
-    email: 'kasaicentral@archiveo.cd',
-    password: 'kasaicentral123',
-    role: 'province',
-    province: 'Kasaï Central',
-    accessLevel: 'admin',
-    canManageUsers: false,
-  },
-  {
-    id: 'super-admin',
-    name: 'Super Admin',
-    email: 'super@archiveo.cd',
-    password: 'super123',
-    role: 'super_admin',
-    province: 'Toutes provinces',
-    accessLevel: 'admin',
-    canManageUsers: true,
-  },
-];
+function toSession(user) {
+  if (!user) return null;
+  const meta = user.app_metadata || {};
+  return {
+    id: user.id,
+    name: user.user_metadata?.name || user.email,
+    email: user.email,
+    role: meta.role || 'province',
+    province: meta.province || 'Kinshasa',
+    accessLevel: meta.accessLevel || 'admin',
+    canManageUsers: meta.role === 'super_admin',
+  };
+}
 
-function safeRead(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return fallback;
-    return JSON.parse(raw);
-  } catch {
-    return fallback;
+async function invokeManageUsers(body) {
+  const { data, error } = await supabase.functions.invoke('manage-users', { body });
+  if (error) {
+    // supabase-js masque le corps de la réponse en cas de statut d'erreur :
+    // on tente de le récupérer pour afficher un message utile.
+    let message = error.message;
+    try {
+      const parsed = await error.context?.json?.();
+      if (parsed?.error) message = parsed.error;
+    } catch {
+      // corps illisible : on garde le message générique
+    }
+    throw new Error(message);
   }
+  if (data?.error) throw new Error(data.error);
+  return data;
 }
 
 const SessionContext = createContext(null);
 
 export function SessionProvider({ children }) {
-  const [accounts, setAccounts] = useState(() => {
-    const stored = safeRead(ACCOUNTS_KEY, DEFAULT_ACCOUNTS);
-    return Array.isArray(stored) && stored.length > 0 ? stored : DEFAULT_ACCOUNTS;
-  });
-  const [session, setSession] = useState(() => safeRead(STORAGE_KEY, null));
+  const [session, setSession] = useState(null);
+  const [initializing, setInitializing] = useState(true);
+  const [accounts, setAccounts] = useState([]);
 
-  const persistAccounts = (nextAccounts) => {
-    setAccounts(nextAccounts);
-    localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(nextAccounts));
-  };
+  useEffect(() => {
+    supabase.auth.getSession()
+      .then(({ data }) => setSession(toSession(data.session?.user || null)))
+      .finally(() => setInitializing(false));
 
-  const signIn = (email, password) => {
-    const account = accounts.find((item) => item.email.toLowerCase() === String(email).trim().toLowerCase() && item.password === String(password));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, authSession) => {
+      setSession(toSession(authSession?.user || null));
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
 
-    if (!account) {
-      throw new Error('Identifiants incorrects. Vérifie le compte choisi dans la liste proposée.');
+  const signIn = async (email, password) => {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: String(email).trim().toLowerCase(),
+      password: String(password),
+    });
+    if (error) {
+      throw new Error(
+        /invalid login credentials/i.test(error.message)
+          ? 'Identifiants incorrects. Vérifiez l’email et le mot de passe.'
+          : error.message
+      );
     }
-
-    const safeSession = {
-      id: account.id,
-      name: account.name,
-      email: account.email,
-      role: account.role,
-      province: account.province,
-      accessLevel: account.accessLevel || 'admin',
-      canManageUsers: account.canManageUsers,
-    };
-
-    setSession(safeSession);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(safeSession));
-    return safeSession;
+    const nextSession = toSession(data.user);
+    setSession(nextSession);
+    return nextSession;
   };
 
-  const signOut = () => {
+  const signOut = async () => {
+    await supabase.auth.signOut();
     setSession(null);
-    localStorage.removeItem(STORAGE_KEY);
+    setAccounts([]);
   };
 
-  const createAccount = (payload) => {
-    const nextAccount = {
-      id: `acct-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      name: payload.name?.trim(),
-      email: payload.email?.trim().toLowerCase(),
-      password: payload.password?.trim(),
-      role: payload.role || 'province',
-      province: payload.province || 'Kinshasa',
-      accessLevel: payload.accessLevel === 'user' ? 'user' : 'admin',
-      canManageUsers: false,
-    };
-
-    if (!nextAccount.name || !nextAccount.email || !nextAccount.password) {
-      throw new Error('Le nom, l’email et le mot de passe sont obligatoires.');
-    }
-
-    if (accounts.some((item) => item.email.toLowerCase() === nextAccount.email)) {
-      throw new Error('Un compte existe déjà avec cet email.');
-    }
-
-    const nextAccounts = [...accounts, nextAccount];
-    persistAccounts(nextAccounts);
-    return nextAccount;
+  const refreshAccounts = async () => {
+    const data = await invokeManageUsers({ action: 'list' });
+    const users = data?.users || [];
+    setAccounts(users);
+    return users;
   };
 
-  const deleteAccount = (accountId) => {
-    const nextAccounts = accounts.filter((item) => item.id !== accountId);
-    persistAccounts(nextAccounts);
-    if (session?.id === accountId) {
-      signOut();
-    }
+  const createAccount = async (payload) => {
+    const province = payload.province || 'Kinshasa';
+    const data = await invokeManageUsers({
+      action: 'create',
+      payload: {
+        name: payload.name?.trim(),
+        email: payload.email?.trim().toLowerCase(),
+        password: payload.password,
+        role: payload.role || (province === 'Kinshasa' ? 'national' : 'province'),
+        province,
+        accessLevel: payload.accessLevel === 'user' ? 'user' : 'admin',
+      },
+    });
+    await refreshAccounts();
+    return data?.user;
+  };
+
+  const deleteAccount = async (accountId) => {
+    await invokeManageUsers({ action: 'delete', payload: { userId: accountId } });
+    await refreshAccounts();
   };
 
   const value = useMemo(() => ({
     accounts,
     session,
+    initializing,
     signIn,
     signOut,
     createAccount,
     deleteAccount,
+    refreshAccounts,
     isSuperAdmin: session?.role === 'super_admin',
     canDeleteDocuments: session?.role === 'super_admin' || (session?.accessLevel || 'admin') !== 'user',
-  }), [accounts, session]);
+  }), [accounts, session, initializing]);
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
