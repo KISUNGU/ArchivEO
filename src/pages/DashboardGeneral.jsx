@@ -1,24 +1,29 @@
 import React, { useEffect, useState } from 'react';
-import { Building2, FileText, Database, Shield, Workflow, ArrowRight } from 'lucide-react';
+import { Building2, FileText, Database, Shield, Workflow, ArrowRight, ShieldCheck, ShieldAlert, Coins } from 'lucide-react';
 import { countDocuments, getProvinceStats, sumDocumentSizeKb } from '../services/documentsService';
+import { getFinanceStats } from '../services/anomaliesService';
+import { formatCents } from '../services/financeChecksService';
 
 export default function DashboardGeneral({ onBack }) {
   const [totalDocuments, setTotalDocuments] = useState(0);
   const [totalSizeKb, setTotalSizeKb] = useState(0);
   const [provinceStats, setProvinceStats] = useState([]);
+  const [finance, setFinance] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const loadDashboard = async () => {
       try {
-        const [count, sizeKb, stats] = await Promise.all([
+        const [count, sizeKb, stats, financeStats] = await Promise.all([
           countDocuments(),
           sumDocumentSizeKb(),
           getProvinceStats(),
+          getFinanceStats(),
         ]);
         setTotalDocuments(count ?? 0);
         setTotalSizeKb(sizeKb ?? 0);
         setProvinceStats(stats ?? []);
+        setFinance(financeStats ?? null);
       } finally {
         setLoading(false);
       }
@@ -75,6 +80,50 @@ export default function DashboardGeneral({ onBack }) {
           <p className="text-xs text-slate-500 dark:text-slate-400">Contrôle centralisé des accès</p>
         </div>
       </div>
+
+      {finance && finance.total > 0 && (
+        <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white/70 dark:bg-white/[0.03] p-4">
+          <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-white">
+            <Coins className="h-4 w-4 text-[#F5A623]" />
+            Conformité des liasses financières
+          </div>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50/80 dark:bg-slate-900/40 p-3">
+              <p className="text-xs text-slate-500 dark:text-slate-400">Liasses archivées</p>
+              <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-white">{finance.total}</p>
+            </div>
+
+            <div className={`rounded-xl border p-3 ${finance.tauxConformite >= 80
+              ? 'border-emerald-500/30 bg-emerald-500/10'
+              : 'border-amber-500/30 bg-amber-500/10'}`}>
+              <p className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+                <ShieldCheck className="h-3 w-3" /> Taux de conformité
+              </p>
+              <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-white">{finance.tauxConformite} %</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                {finance.conformes} liasse(s) sans anomalie majeure
+              </p>
+            </div>
+
+            <div className={`rounded-xl border p-3 ${finance.anomaliesOuvertes
+              ? 'border-rose-500/30 bg-rose-500/10'
+              : 'border-slate-200 dark:border-white/10 bg-slate-50/80 dark:bg-slate-900/40'}`}>
+              <p className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+                <ShieldAlert className="h-3 w-3" /> Anomalies ouvertes
+              </p>
+              <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-white">{finance.anomaliesOuvertes}</p>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50/80 dark:bg-slate-900/40 p-3">
+              <p className="text-xs text-slate-500 dark:text-slate-400">Montant contrôlé</p>
+              <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-white">
+                {formatCents(finance.montantTotalCents, '$')}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white/70 dark:bg-white/[0.03] p-4">
         <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-white">

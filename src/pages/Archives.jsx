@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { DatabaseIcon, Search, Filter, Eye, Trash2, MessageCircle, X, Sparkles, Loader2, Printer, Share2, Download, CheckSquare, Square, ZoomIn, ZoomOut, RotateCw, FileImage, Trash, RotateCcw, XCircle } from 'lucide-react';
 import { listDocuments, listTrash, deleteDocument, restoreDocument, permanentlyDeleteDocument, getDocument } from '../services/documentsService';
+import { countOpenAnomalies } from '../services/anomaliesService';
+import AnomaliesLiasse, { BadgeConformite } from '../components/AnomaliesLiasse';
 import { listCategories } from '../services/categoriesService';
 import { listServiceGroups } from '../services/servicesService';
 import { logActivity } from '../services/activityLogService';
@@ -43,6 +45,7 @@ export default function Archives({ onBack, focusDocumentId = null, onFocusHandle
   const [shareEmails, setShareEmails] = useState(['']);
   const [shareAccessLevel, setShareAccessLevel] = useState('Lecture');
   const [trashMode, setTrashMode] = useState(false);
+  const [anomaliesParDoc, setAnomaliesParDoc] = useState({});
   const { openChat } = useChat();
   const { session, isSuperAdmin, canDeleteDocuments } = useSession();
 
@@ -93,6 +96,20 @@ export default function Archives({ onBack, focusDocumentId = null, onFocusHandle
     }, 250);
     return () => clearTimeout(timeout);
   }, [search, categoryFilter, serviceFilter, dateRangeStart, dateRangeEnd, isSuperAdmin, provinceFilter, session?.province, trashMode]);
+
+  // Compteurs d'anomalies ouvertes, pour la pastille de conformité des liasses.
+  useEffect(() => {
+    const liasses = documents.filter(d => d.ai_fields?.nature === 'finance').map(d => d.id);
+    if (!liasses.length) {
+      setAnomaliesParDoc({});
+      return;
+    }
+    let vivant = true;
+    countOpenAnomalies(liasses)
+      .then(compteurs => { if (vivant) setAnomaliesParDoc(compteurs); })
+      .catch(() => {});
+    return () => { vivant = false; };
+  }, [documents]);
 
   const handleDelete = async (doc) => {
     if (!canDeleteDocuments) return;
@@ -582,6 +599,9 @@ export default function Archives({ onBack, focusDocumentId = null, onFocusHandle
                   >
                     {doc.categories?.name || doc.doc_type || 'Non classé'}
                   </span>
+                  {doc.ai_fields?.nature === 'finance' && (
+                    <BadgeConformite compteurs={anomaliesParDoc[doc.id]} className="mt-1 flex w-fit" />
+                  )}
                 </td>
                 <td className="px-4 py-3 align-middle border-l border-slate-200 dark:border-white/10">
                   <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-slate-100 dark:bg-white/5 text-xs font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap max-w-36 truncate">
@@ -653,6 +673,15 @@ export default function Archives({ onBack, focusDocumentId = null, onFocusHandle
               <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-white/5">{preview.page_count} page(s)</span>
               <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-white/5 capitalize">Source : {preview.source}</span>
             </div>
+
+            {preview.ai_fields?.nature === 'finance' && (
+              <AnomaliesLiasse
+                documentId={preview.id}
+                fields={preview.ai_fields}
+                userId={session?.id || null}
+                compact
+              />
+            )}
 
             {preview.file_url && (
               <div className="flex gap-1.5 border-b border-slate-200 dark:border-white/10">

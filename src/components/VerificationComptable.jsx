@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { CheckCircle2, AlertCircle, Plus, Trash2, Loader2, X } from 'lucide-react';
 import { getFraisByQueueId, updateFrais, deleteFrais, createFrais } from '../services/fraisService';
+import AnomaliesLiasse from './AnomaliesLiasse';
 
-export default function VerificationComptable({ queueId, onClose, onConfirm }) {
+export default function VerificationComptable({ queueId, onClose, onConfirm, documentId = null, fields = null, userId = null }) {
   const [frais, setFrais] = useState([]);
   const [loading, setLoading] = useState(true);
   const [newFrais, setNewFrais] = useState({ label: '', montant: '' });
@@ -110,6 +111,11 @@ export default function VerificationComptable({ queueId, onClose, onConfirm }) {
           </div>
         ) : (
           <>
+            {/* Contrôles automatiques de la liasse archivée */}
+            {documentId && (
+              <AnomaliesLiasse documentId={documentId} fields={fields} userId={userId} compact />
+            )}
+
             {/* Liste des frais */}
             <div className="space-y-2">
               <p className="text-slate-900 dark:text-white text-sm font-semibold">Éléments d'autres frais</p>
@@ -148,7 +154,7 @@ export default function VerificationComptable({ queueId, onClose, onConfirm }) {
                           />
                         ) : (
                           <span className="text-slate-900 dark:text-white font-medium w-24 text-right">
-                            {(f.montant || 0).toFixed(2)} €
+                            {(f.montant || 0).toFixed(2)} $
                           </span>
                         )}
                       </div>
@@ -209,11 +215,11 @@ export default function VerificationComptable({ queueId, onClose, onConfirm }) {
             <div className="bg-purple-50 dark:bg-purple-500/10 border border-purple-200 dark:border-purple-500/30 rounded-lg p-3 space-y-1">
               <div className="flex justify-between items-center">
                 <span className="text-slate-900 dark:text-white text-sm">Total (sélectionnés)</span>
-                <span className="text-lg font-bold text-purple-600 dark:text-purple-400">{totalSelectionne} €</span>
+                <span className="text-lg font-bold text-purple-600 dark:text-purple-400">{totalSelectionne} $</span>
               </div>
               <div className="flex justify-between items-center text-xs text-slate-500">
                 <span>Total (tous les frais)</span>
-                <span>{totalTous} €</span>
+                <span>{totalTous} $</span>
               </div>
             </div>
 

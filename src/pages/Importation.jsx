@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   HandCoins, Upload, FolderOpen, FileText, Loader2, Sparkles, Save, CheckCircle2, Mail,
-  Calendar, User, Tag, Building2, ClipboardList,
+  Calendar, User, Tag, Building2, ClipboardList, ShieldAlert, RefreshCw,
 } from 'lucide-react';
 import { extractPdfText, renderPdfFirstPage, renderPdfPagesAsBase64 } from '../services/pdfTextExtractor';
 import { summarizeDocument } from '../services/aiAgentService';
@@ -10,6 +10,9 @@ import { listServiceGroups, listServices } from '../services/servicesService';
 import { createDocument } from '../services/documentsService';
 import { logActivity } from '../services/activityLogService';
 import { uploadDocumentFile } from '../services/storageService';
+import { normalizeFinanceFields, runFinanceChecks } from '../services/financeChecksService';
+import { saveAnomalies } from '../services/anomaliesService';
+import AnomaliesLiasse from '../components/AnomaliesLiasse';
 import { useSession } from '../context/SessionContext';
 
 const EXT_TYPE = {
@@ -25,6 +28,25 @@ const EXT_TYPE = {
 };
 
 const IMAGE_EXT = new Set(['jpg', 'jpeg', 'png']);
+
+// Natures de traitement : chacune déclenche ses propres contrôles métier.
+const NATURES = [
+  { value: '', label: 'Aucun contrôle métier' },
+  { value: 'finance', label: 'Liasse financière' },
+];
+
+const INDICES_FINANCE = [
+  /liasse/i, /bordereau/i, /ch[eè]que/i, /d[eé]caissement/i, /paiement/i,
+  /forfait/i, /indemnit/i, /grille de contr[oô]le/i, /journal\s*BQ/i,
+  /\bBQ\d{3,}\b/i, /imputation/i, /d[eé]bit/i, /cr[eé]dit/i,
+];
+
+/** Propose une nature de traitement à partir du nom de fichier et du texte lu. */
+function detecterNature(fileName, contentText) {
+  const cible = `${fileName} ${(contentText || '').slice(0, 4000)}`;
+  const score = INDICES_FINANCE.reduce((acc, r) => acc + (r.test(cible) ? 1 : 0), 0);
+  return score >= 2 ? 'finance' : '';
+}
 
 let tempId = 0;
 
@@ -124,11 +146,99 @@ export default function Importation({ onBack }) {
     setItems(prev => prev.map(it => (it.id === id ? { ...it, form: { ...it.form, ...patch } } : it)));
   };
 
+  // Analyse IA d'un fichier déjà lu. Isolée de processFile pour pouvoir être
+  // relancée quand l'archiviste change la nature du traitement.
+  const lancerAnalyse = async ({ id, file, ext, docType, contentText, nature }) => {
+    updateItem(id, { status: 'analyzing', nature, anomalies: [], financeFields: null });
+    const [loadedCategories, , loadedServices] = await (metadataReady.current
+      || Promise.all([listCategories(), listServiceGroups(), listServices()]));
+
+    try {
+      let imageBase64, imagesBase64, imageMediaType;
+      if (!contentText && IMAGE_EXT.has(ext) && file.size < 4.5 * 1024 * 1024) {
+        imageBase64 = await fileToBase64(file);
+        imageMediaType = ext === 'png' ? 'image/png' : 'image/jpeg';
+      } else if (ext === 'pdf' && (!contentText || nature === 'finance')) {
+        // Une liasse financière est toujours relue en vision : les visas, les
+        // signatures et les mentions manuscrites n'existent pas dans le calque texte.
+        try {
+          const rendered = await renderPdfPagesAsBase64(file);
+          imagesBase64 = rendered.imagesBase64;
+          imageMediaType = rendered.mediaType;
+        } catch {
+          // sans rendu possible, l'IA se basera sur le texte ou le nom du fichier
+        }
+      }
+
+      const result = await summarizeDocument({
+        fileName: file.name,
+        docType,
+        nature,
+        contentText,
+        imageBase64,
+        imagesBase64,
+        imageMediaType,
+        categories: loadedCategories.map(c => c.name),
+        services: loadedServices.map(s => s.name),
+      });
+
+      // L'IA extrait, le programme vérifie : aucun calcul n'est délégué au modèle.
+      let financeFields = null;
+      let anomalies = [];
+      if (nature === 'finance' && result.fields) {
+        financeFields = normalizeFinanceFields(result.fields);
+        anomalies = runFinanceChecks(financeFields, {
+          confidence: result.confidence,
+          analysePartielle: result.analysePartielle,
+          pagesAnalysees: result.pagesAnalysees,
+        });
+      }
+
+      const matchedCategory = loadedCategories.find(c => normalizeLabel(c.name) === normalizeLabel(result.category));
+      const matchedService = loadedServices.find(s => normalizeLabel(s.name) === normalizeLabel(result.serviceName));
+      const extractedSender = extractLabeledValue(contentText, ['expéditeur', 'expediteur', 'auteur', 'de']);
+      const extractedSubject = extractLabeledValue(contentText, ['objet', 'subject']);
+
+      updateItem(id, {
+        status: 'ready',
+        aiResult: result,
+        financeFields,
+        anomalies,
+        contentText: contentText || result.extractedText || '',
+        form: {
+          title: result.title || file.name.replace(/\.[^.]+$/, ''),
+          docDate: parseDocumentDate(result.docDate || extractLabeledValue(contentText, ['date'])),
+          sender: result.sender || extractedSender,
+          subject: result.subject || extractedSubject,
+          categoryId: matchedCategory ? matchedCategory.id : '',
+          serviceId: matchedService ? matchedService.id : '',
+          tags: (result.tags || []).join(', '),
+          summary: result.summary || '',
+        },
+      });
+    } catch (err) {
+      updateItem(id, { status: 'error', error: err.message });
+    }
+  };
+
+  /** Relance l'analyse quand l'archiviste corrige la nature du traitement. */
+  const changerNature = (item, nature) => {
+    const ext = item.name.split('.').pop()?.toLowerCase() || '';
+    lancerAnalyse({
+      id: item.id,
+      file: item.file,
+      ext,
+      docType: item.docType,
+      contentText: item.contentText,
+      nature,
+    });
+  };
+
   const processFile = async (file) => {
     const id = ++tempId;
     const ext = file.name.split('.').pop()?.toLowerCase() || '';
     const docType = EXT_TYPE[ext] || 'Autre';
-    const [loadedCategories, , loadedServices] = await (metadataReady.current || Promise.all([listCategories(), listServiceGroups(), listServices()]));
+    await (metadataReady.current || Promise.all([listCategories(), listServiceGroups(), listServices()]));
 
     setItems(prev => [...prev, {
       id, file, name: file.name, sizeKb: Math.round(file.size / 1024), docType,
@@ -141,57 +251,10 @@ export default function Importation({ onBack }) {
       buildPreview(file, ext),
     ]);
     updateItem(id, { contentText, pageCount, previewUrl, status: 'analyzing' });
-
-    try {
-      let imageBase64, imagesBase64, imageMediaType;
-      if (!contentText && IMAGE_EXT.has(ext) && file.size < 4.5 * 1024 * 1024) {
-        imageBase64 = await fileToBase64(file);
-        imageMediaType = ext === 'png' ? 'image/png' : 'image/jpeg';
-      } else if (!contentText && ext === 'pdf') {
-        // PDF scanné (image pure, sans calque texte) : on rend les premières pages
-        // en images pour que l'IA les lise par vision (OCR).
-        try {
-          const rendered = await renderPdfPagesAsBase64(file);
-          imagesBase64 = rendered.imagesBase64;
-          imageMediaType = rendered.mediaType;
-        } catch {
-          // sans rendu possible, l'IA se basera sur le nom du fichier
-        }
-      }
-
-      const result = await summarizeDocument({
-        fileName: file.name,
-        docType,
-        contentText,
-        imageBase64,
-        imagesBase64,
-        imageMediaType,
-        categories: loadedCategories.map(c => c.name),
-        services: loadedServices.map(s => s.name),
-      });
-
-      const matchedCategory = loadedCategories.find(c => normalizeLabel(c.name) === normalizeLabel(result.category));
-      const matchedService = loadedServices.find(s => normalizeLabel(s.name) === normalizeLabel(result.serviceName));
-      const extractedSender = extractLabeledValue(contentText, ['expéditeur', 'expediteur', 'auteur', 'de']);
-      const extractedSubject = extractLabeledValue(contentText, ['objet', 'subject']);
-      updateItem(id, {
-        status: 'ready',
-        aiResult: result,
-        contentText: contentText || result.extractedText || '',
-        form: {
-          title: result.title || file.name.replace(/\.[^.]+$/, ''),
-          docDate: parseDocumentDate(result.docDate || extractLabeledValue(contentText, ['date'])) ,
-          sender: result.sender || extractedSender,
-          subject: result.subject || extractedSubject,
-          categoryId: matchedCategory ? matchedCategory.id : '',
-          serviceId: matchedService ? matchedService.id : '',
-          tags: (result.tags || []).join(', '),
-          summary: result.summary || '',
-        },
-      });
-    } catch (err) {
-      updateItem(id, { status: 'error', error: err.message });
-    }
+    await lancerAnalyse({
+      id, file, ext, docType, contentText,
+      nature: detecterNature(file.name, contentText),
+    });
   };
 
   const handleFiles = (fileList) => {
@@ -223,6 +286,7 @@ export default function Importation({ onBack }) {
         ai_summary: item.form.summary,
         ai_tags: item.form.tags.split(',').map(t => t.trim()).filter(Boolean),
         ai_confidence: item.aiResult?.confidence ?? null,
+        ai_fields: item.financeFields || {},
         doc_date: item.form.docDate || null,
         sender: item.form.sender || null,
         subject: item.form.subject || null,
@@ -233,6 +297,15 @@ export default function Importation({ onBack }) {
         action: 'ai_summary',
         detail: item.aiResult?.demo ? 'Résumé généré (mode démo, sans clé IA)' : 'Résumé généré par Claude',
       });
+
+      if (item.anomalies?.length) {
+        await saveAnomalies(newDoc.id, item.anomalies);
+        await logActivity({
+          documentId: newDoc.id,
+          action: 'controle_metier',
+          detail: `${item.anomalies.length} anomalie(s) relevée(s) sur la liasse`,
+        });
+      }
       updateItem(item.id, { status: 'saved' });
     } catch (err) {
       updateItem(item.id, { status: 'error', error: err.message });
@@ -351,6 +424,43 @@ export default function Importation({ onBack }) {
                       {item.aiResult?.demo && !item.aiResult?.fallbackReason && <span className="ml-2 text-amber-500 dark:text-amber-300">(mode démo)</span>}
                     </span>
                   </div>
+
+                  <div className="flex flex-col gap-1">
+                    <span className={labelCls}><ShieldAlert className="h-3 w-3" /> Contrôles métier</span>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={item.nature || ''}
+                        onChange={e => changerNature(item, e.target.value)}
+                        disabled={item.status === 'analyzing'}
+                        className={`${inputCls} disabled:opacity-50`}
+                      >
+                        {NATURES.map(n => <option key={n.value} value={n.value}>{n.label}</option>)}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => changerNature(item, item.nature || '')}
+                        disabled={item.status === 'analyzing'}
+                        title="Relancer l'analyse"
+                        className="shrink-0 rounded-lg border border-slate-200 dark:border-white/10 p-2 text-slate-400 hover:text-teal-500 disabled:opacity-50 transition-colors"
+                      >
+                        <RefreshCw className={`h-3.5 w-3.5 ${item.status === 'analyzing' ? 'animate-spin' : ''}`} />
+                      </button>
+                    </div>
+                  </div>
+
+                  {item.nature === 'finance' && item.status === 'ready' && (
+                    item.financeFields ? (
+                      <AnomaliesLiasse
+                        anomalies={item.anomalies || []}
+                        fields={item.financeFields}
+                      />
+                    ) : (
+                      <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-600 dark:text-amber-300">
+                        Aucune structure financière n'a pu être extraite : les contrôles automatiques
+                        n'ont pas pu s'exécuter. Vérifiez la liasse manuellement avant d'archiver.
+                      </div>
+                    )
+                  )}
 
                   {item.aiResult?.fallbackReason && (
                     <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-2.5 text-amber-600 dark:text-amber-300 text-xs">
